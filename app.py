@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
+import numpy as np
 from io import BytesIO
 
 # Import your existing calculators
@@ -12,12 +14,23 @@ from calculators.assembly import (
     Fragment,
     compute_assembly_protocol
 )
+from calculators.protein_conc import (
+    parse_standard_duplicates,
+    compute_standard_regression,
+    compute_sample_concentration,
+    compute_total_yield
+)
 
 def main():
     st.sidebar.title("Navigation")
     page_selection = st.sidebar.radio(
         "Go to:",
-        ("Home", "Molarity Calculator", "Gibson Assembly Calculator")
+        (
+            "Home",
+            "Molarity Calculator",
+            "Gibson Assembly Calculator",
+            "Protein (BCA) Calculator"
+        )
     )
 
     if page_selection == "Home":
@@ -26,6 +39,8 @@ def main():
         show_molarity_calculator()
     elif page_selection == "Gibson Assembly Calculator":
         show_gibson_assembly_calculator()
+    elif page_selection == "Protein (BCA) Calculator":
+        show_bca_protein_calculator()
 
 
 def show_home():
@@ -143,6 +158,215 @@ def show_gibson_assembly_calculator():
         except ValueError as e:
             st.error(str(e))
 
+def show_bca_protein_calculator():
+    """
+    Streamlit UI for the Protein Concentration & Yield Calculator (BCA),
+    using fixed standard concentrations (A1–A9) with duplicates,
+    generating a line graph with slope/intercept, and optional Excel export.
+    """
+    st.title("Protein Concentration & Yield Calculator (BCA) - Fixed Standards")
+    st.markdown("""
+    This calculator uses **fixed standard concentrations** for wells A1–A9:
+    **2.0, 1.5, 1.0, 0.75, 0.5, 0.25, 0.125, 0.025, 0.0 mg/mL** (each in duplicate).
+    
+    **Steps**:
+    1. **Paste Standard Duplicates**: 9 lines, each with 2 columns of absorbance (rep1, rep2).
+    2. **Compute** the standard curve. A chart will appear showing your data + best-fit line.
+    3. **Sample Info**: up to 3 dilutions.
+    4. **Export** to Excel if desired.
+    """)
+
+    # 1) Paste standard data
+    st.subheader("1. Paste Standard Duplicate Absorbances (A1–A9)")
+    st.markdown("""
+    - Provide **9 lines** of data, each with **2 columns** for the duplicate absorbances.
+    - Example (tabs/spaces):
+      ```
+      0.200 0.210
+      0.155 0.158
+      0.105 0.110
+      ...
+      0.010 0.012
+      ```
+    """)
+
+    raw_std_text = st.text_area("Paste standard duplicates here:", height=200)
+
+    # Initialize placeholders
+    standard_df = None
+    slope, intercept = None, None
+
+    if raw_std_text.strip():
+        try:
+            standard_df = parse_standard_duplicates(raw_std_text)
+            st.write("**Parsed Standard Data**:")
+            st.dataframe(standard_df)
+
+            slope, intercept = compute_standard_regression(standard_df)
+            st.write(f"**Linear Fit**: Abs = {slope:.4f} * Conc + {intercept:.4f}")
+
+            # 2) Show line graph with data + regression line
+            st.subheader("Standard Curve Graph")
+            chart = create_standard_curve_plot(standard_df, slope, intercept)
+            st.altair_chart(chart, use_container_width=True)
+
+        except ValueError as ve:
+            st.error(str(ve))
+
+    # 3) Sample info
+    st.subheader("2. Sample Information & Dilutions")
+    sample_name = st.text_input("Protein Sample Name:", value="MyProtein")
+    total_volume_uL = st.number_input("Total Sample Volume (µL):", value=1000.0, step=100.0)
+
+    st.markdown("""
+    **Dilutions (technical)**:
+    - Up to 3 different dilutions tested in the BCA assay.
+    - For each, specify **Dilution Factor** and **Absorbance** (single reading).
+    """)
+
+    dilutions_data = []
+    for i in range(1, 4):
+        col1, col2 = st.columns(2)
+        with col1:
+            dil_factor = st.number_input(f"Dilution {i} Factor:", min_value=1.0, value=1.0, step=0.5, key=f"dil_factor_{i}")
+        with col2:
+            abs_val = st.number_input(f"Dilution {i} Absorbance:", min_value=0.0, value=0.0, format="%.4f", key=f"dil_abs_{i}")
+        dilutions_data.append((dil_factor, abs_val))
+
+    if st.button("Compute Protein Concentration & Yield"):
+        if standard_df is None or slope is None or intercept is None:
+            st.error("Cannot compute: standard curve not established.")
+        else:
+            # Compute concentration for each valid dilution
+            computed_concs = []
+            for (dfactor, abs_val) in dilutions_data:
+                if abs_val > 0:
+                    c_val = compute_sample_concentration(abs_val, slope, intercept, dfactor)
+                    computed_concs.append(c_val)
+
+            if len(computed_concs) == 0:
+                st.error("No positive absorbance readings were provided.")
+            else:
+                avg_conc = sum(computed_concs) / len(computed_concs)
+                total_mg = compute_total_yield(avg_conc, total_volume_uL)
+
+                st.success(f"**Results for {sample_name}**")
+                st.write(f"- Final Protein Concentration: **{avg_conc:.3f} mg/mL**")
+                st.write(f"- Total Yield: **{total_mg:.3f} mg** (in {total_volume_uL:.1f} µL)")
+
+                # 4) Offer Excel download
+                df_result = build_excel_output(
+                    standard_df, slope, intercept, sample_name, avg_conc, total_mg
+                )
+                st.download_button(
+                    label="Download Results (Excel)",
+                    data=df_to_excel_bytes(df_result),
+                    file_name=f"BCA_results_{sample_name}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+# ------------- SUPPORT FUNCTIONS FOR PLOTTING & EXCEL EXPORT -----------------
+
+def create_standard_curve_plot(standard_df: pd.DataFrame, slope: float, intercept: float):
+    """
+    Create an Altair plot showing the standard points (mean Abs) vs. concentration,
+    plus a best-fit line using slope/intercept.
+    """
+    # data points
+    points = alt.Chart(standard_df).mark_point(size=80, color="blue").encode(
+        x=alt.X("conc_mg_mL", title="Concentration (mg/mL)"),
+        y=alt.Y("abs_mean", title="Absorbance"),
+        tooltip=["conc_mg_mL", "abs_mean"]
+    )
+
+    # regression line
+    x_min = standard_df["conc_mg_mL"].min()
+    x_max = standard_df["conc_mg_mL"].max()
+    # We'll generate a range of x for the line
+    line_x = np.linspace(x_min, x_max, 50)
+    line_y = slope * line_x + intercept
+    line_source = pd.DataFrame({"conc_mg_mL": line_x, "abs_fit": line_y})
+
+    fit_line = alt.Chart(line_source).mark_line(color="red").encode(
+        x="conc_mg_mL",
+        y="abs_fit"
+    )
+
+    # Combine
+    chart = alt.layer(points, fit_line).properties(
+        width=600,
+        height=400,
+        title=f"Standard Curve (slope={slope:.4f}, intercept={intercept:.4f})"
+    )
+    return chart
+
+
+def build_excel_output(
+    standard_df: pd.DataFrame,
+    slope: float,
+    intercept: float,
+    sample_name: str,
+    avg_concentration: float,
+    total_mg: float
+) -> pd.DataFrame:
+    """
+    Build a single DataFrame with standard results + final sample results,
+    ready for Excel export.
+    """
+    df_out = standard_df.copy()
+    df_out["slope"] = slope
+    df_out["intercept"] = intercept
+
+    # Ensure columns exist for new data
+    for col in ["Sample_Name", "Total_mg"]:
+        if col not in df_out.columns:
+            df_out[col] = None
+
+    # Prepare rows for extra_data & sample_info
+    extra_data = {
+        "conc_mg_mL": None,
+        "abs_rep1": None,
+        "abs_rep2": None,
+        "abs_mean": None,
+        "slope": slope,
+        "intercept": intercept,
+        "Sample_Name": None,
+        "Total_mg": None
+    }
+    sample_info = {
+        "conc_mg_mL": avg_concentration,   # store final computed concentration
+        "abs_rep1": None,
+        "abs_rep2": None,
+        "abs_mean": None,
+        "slope": slope,
+        "intercept": intercept,
+        "Sample_Name": sample_name,
+        "Total_mg": total_mg
+    }
+
+    # Convert these dicts into single-row DataFrames
+    df_extra = pd.DataFrame([extra_data])
+    df_sample = pd.DataFrame([sample_info])
+
+    # Concatenate them to the bottom of df_out
+    df_out = pd.concat([df_out, df_extra, df_sample], ignore_index=True)
+
+    return df_out
+
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """
+    Convert a DataFrame to an Excel file in-memory, returning the raw bytes.
+    """
+    from openpyxl import Workbook
+    from openpyxl.writer.excel import save_workbook
+    from pandas import ExcelWriter
+    import io
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="BCA_Results")
+    return buffer.getvalue()
 
 if __name__ == "__main__":
     main()
