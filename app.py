@@ -4,16 +4,20 @@ import altair as alt
 import numpy as np
 from io import BytesIO
 
-# Import your existing calculators
+# --- Molarity logic imports ---
 from calculators.molarity import (
     calculate_mass,
     calculate_molarity,
     calculate_volume
 )
+
+# --- Gibson Assembly logic imports ---
 from calculators.assembly import (
     Fragment,
     compute_assembly_protocol
 )
+
+# --- Protein (BCA) logic imports ---
 from calculators.protein_conc import (
     parse_standard_duplicates,
     compute_standard_regression,
@@ -54,24 +58,129 @@ def show_home():
       and multi-mode calculations.
     - **Gibson Assembly Calculator**: Quickly compute volumes for vector and insert(s)
       using NEBuilder HiFi or Gibson-style assembly.
-      
+    - **Protein (BCA) Calculator**: Analyze protein concentration and yield with 
+      a standard BCA assay approach.
+
     More features on the way!
     """)
 
 
 def show_molarity_calculator():
-    # Your existing “complicated” molarity calculator code
+    """
+    Displays an advanced Molarity Calculator with multiple modes:
+    1) Calculate Mass: (desired M, volume) => grams
+    2) Calculate Molarity: (mass, volume) => M
+    3) Calculate Volume: (mass, desired M) => liters
+    Includes unit conversions and reagent selection.
+    """
     st.title("Molarity Calculator")
-    # ... (omitted for brevity)
-    # See earlier sections for the full code
-    pass
+    st.markdown("""
+    This calculator supports:
+    - **Calculate Mass** – Given a target concentration (M) and volume (L), determine
+      how much solute (in grams) you need.
+    - **Calculate Molarity** – Given a solute mass (g) and total solution volume (L),
+      figure out the final molar concentration (M).
+    - **Calculate Volume** – Given a solute mass (g) and a target molar concentration (M),
+      compute how much total solution volume you should prepare.
+    - **Unit Conversions** for concentration (M, mM, µM, nM) and volume (L, mL, µL).
+    - **Common Reagents** with predefined molecular weights or a custom option.
+    """)
+
+    # Dictionary of common reagents and their MW
+    common_reagents = {
+        "NaCl": 58.44,
+        "IPTG": 238.31,
+        "Tris Base": 121.14,
+        "EDTA (disodium salt)": 372.24,
+        "Glucose (Dextrose)": 180.16
+    }
+
+    # Let user select calculation mode
+    calc_mode = st.radio(
+        "Select Calculation Mode:",
+        ["Calculate Mass", "Calculate Molarity", "Calculate Volume"]
+    )
+
+    # Reagent selection
+    reagent_options = ["Custom"] + list(common_reagents.keys())
+    selected_reagent = st.selectbox("Select a reagent or 'Custom':", reagent_options)
+
+    if selected_reagent == "Custom":
+        molecular_weight = st.number_input(
+            "Molecular Weight (g/mol)",
+            min_value=0.0,
+            value=0.0,
+            format="%.2f"
+        )
+    else:
+        molecular_weight = common_reagents[selected_reagent]
+        st.write(f"**Molecular Weight (g/mol):** {molecular_weight}")
+
+    # Dictionaries for unit conversions
+    conc_unit_factors = {"M": 1.0, "mM": 1e-3, "µM": 1e-6, "nM": 1e-9}
+    vol_unit_factors = {"L": 1.0, "mL": 1e-3, "µL": 1e-6}
+    mass_unit_factors = {"g": 1.0, "mg": 1e-3, "µg": 1e-6}
+
+    if calc_mode == "Calculate Mass":
+        # M & Volume -> Mass in grams
+        conc_val = st.number_input("Concentration value:", min_value=0.0, value=1.0, format="%.4f")
+        conc_unit = st.selectbox("Concentration units:", list(conc_unit_factors.keys()))
+
+        vol_val = st.number_input("Volume value:", min_value=0.0, value=1.0, format="%.4f")
+        vol_unit = st.selectbox("Volume units:", list(vol_unit_factors.keys()))
+
+        if st.button("Calculate Required Mass"):
+            if molecular_weight <= 0:
+                st.error("Molecular weight must be greater than 0.")
+            else:
+                # Convert to M, L
+                concentration_m = conc_val * conc_unit_factors[conc_unit]
+                volume_l = vol_val * vol_unit_factors[vol_unit]
+
+                mass_needed = calculate_mass(molecular_weight, concentration_m, volume_l)
+                st.success(f"Mass required: {mass_needed:.4f} g")
+
+    elif calc_mode == "Calculate Molarity":
+        # Mass & Volume -> M
+        mass_val = st.number_input("Mass value:", min_value=0.0, value=1.0)
+        mass_unit = st.selectbox("Mass units:", list(mass_unit_factors.keys()))
+
+        vol_val = st.number_input("Volume value:", min_value=0.0, value=1.0)
+        vol_unit = st.selectbox("Volume units:", list(vol_unit_factors.keys()))
+
+        if st.button("Calculate Molarity"):
+            if molecular_weight <= 0:
+                st.error("Molecular weight must be greater than 0.")
+            else:
+                mass_g = mass_val * mass_unit_factors[mass_unit]
+                volume_l = vol_val * vol_unit_factors[vol_unit]
+
+                molarity_m = calculate_molarity(molecular_weight, mass_g, volume_l)
+                st.success(f"Molarity: {molarity_m:.4f} M")
+
+    else:  # "Calculate Volume"
+        # Mass & M -> Volume in liters
+        mass_val = st.number_input("Mass value:", min_value=0.0, value=1.0)
+        mass_unit = st.selectbox("Mass units:", list(mass_unit_factors.keys()))
+
+        conc_val = st.number_input("Desired Concentration:", min_value=0.0, value=1.0, format="%.4f")
+        conc_unit = st.selectbox("Concentration units:", list(conc_unit_factors.keys()))
+
+        if st.button("Calculate Volume"):
+            if molecular_weight <= 0:
+                st.error("Molecular weight must be greater than 0.")
+            else:
+                mass_g = mass_val * mass_unit_factors[mass_unit]
+                concentration_m = conc_val * conc_unit_factors[conc_unit]
+
+                volume_l = calculate_volume(molecular_weight, mass_g, concentration_m)
+                st.success(f"Volume required: {volume_l:.4f} L")
 
 
 def show_gibson_assembly_calculator():
     """
     Displays the Gibson/NEBuilder Assembly Calculator UI with an export-to-Excel option.
     """
-
     st.title("Gibson/NEBuilder Assembly Calculator")
     st.markdown("""
     This calculator helps you set up a Gibson or NEBuilder HiFi DNA Assembly reaction.
@@ -131,8 +240,7 @@ def show_gibson_assembly_calculator():
             st.write(f"**Water Volume:** {result['water_volume']:.2f} µL")
             st.write(f"**Total Reaction Volume:** {result['total_reaction_volume']:.2f} µL")
 
-            # --- EXPORT TO EXCEL FEATURE ---
-            # Create a DataFrame for easy Excel export
+            # --- EXPORT TO EXCEL ---
             data_rows = []
             for f_name, vol in result["fragment_volumes"].items():
                 data_rows.append({"Component": f_name, "Volume (µL)": round(vol, 2)})
@@ -157,6 +265,7 @@ def show_gibson_assembly_calculator():
 
         except ValueError as e:
             st.error(str(e))
+
 
 def show_bca_protein_calculator():
     """
@@ -282,7 +391,6 @@ def create_standard_curve_plot(standard_df: pd.DataFrame, slope: float, intercep
     # regression line
     x_min = standard_df["conc_mg_mL"].min()
     x_max = standard_df["conc_mg_mL"].max()
-    # We'll generate a range of x for the line
     line_x = np.linspace(x_min, x_max, 50)
     line_y = slope * line_x + intercept
     line_source = pd.DataFrame({"conc_mg_mL": line_x, "abs_fit": line_y})
@@ -292,7 +400,6 @@ def create_standard_curve_plot(standard_df: pd.DataFrame, slope: float, intercep
         y="abs_fit"
     )
 
-    # Combine
     chart = alt.layer(points, fit_line).properties(
         width=600,
         height=400,
@@ -317,12 +424,10 @@ def build_excel_output(
     df_out["slope"] = slope
     df_out["intercept"] = intercept
 
-    # Ensure columns exist for new data
     for col in ["Sample_Name", "Total_mg"]:
         if col not in df_out.columns:
             df_out[col] = None
 
-    # Prepare rows for extra_data & sample_info
     extra_data = {
         "conc_mg_mL": None,
         "abs_rep1": None,
@@ -334,7 +439,7 @@ def build_excel_output(
         "Total_mg": None
     }
     sample_info = {
-        "conc_mg_mL": avg_concentration,   # store final computed concentration
+        "conc_mg_mL": avg_concentration,
         "abs_rep1": None,
         "abs_rep2": None,
         "abs_mean": None,
@@ -344,11 +449,8 @@ def build_excel_output(
         "Total_mg": total_mg
     }
 
-    # Convert these dicts into single-row DataFrames
     df_extra = pd.DataFrame([extra_data])
     df_sample = pd.DataFrame([sample_info])
-
-    # Concatenate them to the bottom of df_out
     df_out = pd.concat([df_out, df_extra, df_sample], ignore_index=True)
 
     return df_out
@@ -358,15 +460,16 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     """
     Convert a DataFrame to an Excel file in-memory, returning the raw bytes.
     """
+    import io
     from openpyxl import Workbook
     from openpyxl.writer.excel import save_workbook
     from pandas import ExcelWriter
-    import io
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="BCA_Results")
     return buffer.getvalue()
+
 
 if __name__ == "__main__":
     main()
