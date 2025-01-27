@@ -66,7 +66,7 @@ LabZen also includes:
     ```bash
     streamlit run app.py
     ```
-5. **Open the local link (usually http://localhost:8501) in your browser.
+5. **Open the local link (usually http://localhost:8501) in your browser.**
 
 ---
 
